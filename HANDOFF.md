@@ -116,7 +116,9 @@ ret
   - `flash`：`lk`/`lk_a`/`lk_b`/`lk_ab` 命中，`lk2`/`boot`/`lk_a1` 放行；
   - `erase`：`lk`/`lk_a` 命中，`system` 放行；
   - 伪回锁 cave 依次追加 green 与原 bootreason；
-- 两种模式（fail / okay）以及 `--lk-protect off` 均构建通过。
+- 两种模式（fail / okay）以及 `--lk-protect off` 均构建通过；
+- `tests/verify_build.py`：对成品镜像做发布前检查（分区结构、非 lk 分区与全部 cert1
+  是否与原厂一致、cert2 override hash、私钥与镜像内模数是否配对），任一失败返回非零。
 
 未做（必须在真机确认）：
 
@@ -135,6 +137,8 @@ ret
 - 首次刷入需要 BROM、由现有 LK 放行 lk 写入，或 root 直接写**真实**块设备节点
   （注意 `/dev/block/by-name` 可能被 loop 重定向模块替换）。
 - 固件更新后需要基于新镜像重新构建；地址全部由扫描得到，但 cave 位置需要重新确认。
+- 实测：写保护只覆盖**当前活动槽**的 lk，空闲槽可以正常写入（见第 9 节）；因此可以
+  先在空闲槽上做实验，但切槽后系统是否可启动、boot reason 是否保留，取决于机型。
 
 ## 6. 复现步骤
 
@@ -157,9 +161,12 @@ python lk-unlock.py unlock
 
 ## 7. 待办
 
-- [ ] 真机启动与拦截效果验证（最高优先级）。
-- [ ] 可选 `--fake-lock-full`：同时把 `androidboot.vbmeta.device_state` 改为 locked，
-      作为开关而不是默认。
+- [ ] 用二分构建（仅 liblk 重建 / 仅换 key / 仅 no-wipe / 完整镜像）在空闲槽上定位
+      “镜像能写入但进不了 fastboot”的原因（最高优先级）。
+- [ ] 真机启动与拦截效果验证。
+- [ ] `verify_build.py` 接入构建流程（构建后自动跑一遍）。
+- [ ] 可选 `--fake-lock-full`：同时把 `androidboot.vbmeta.device_state` 改为 locked；
+      由于用户态模块已能覆盖该属性，优先做成模块而不是 LK 补丁。
 - [ ] cave 探测增加后备策略（函数间对齐填充、按段大小裁剪）。
 - [ ] 为 `inject.py` / `protect.py` 增加不依赖 Unicorn 的单元测试（编码器、发现逻辑）。
 - [ ] 固定 liblk 版本（当前依赖 `@master`，存在漂移风险）。
@@ -171,7 +178,34 @@ python lk-unlock.py unlock
 第三方作者与社群信息、附件路径、镜像哈希。
 文档中的具体地址仅作原理说明，实际值在构建时由代码扫描得到。
 
-## 9. 变更记录
+## 9. 现场测试记录（2026-11-21）
+
+测试条件：A/B 机型、bootloader 锁定、临时 root（KernelSU）、无 BROM；活动槽为 a，
+lk_a、lk_b、userdata 均已备份。
+
+| # | 操作 | 结果 |
+|---|---|---|
+| 1 | root 下 `dd` 写活动槽 lk_a | `Buffer I/O error ... lost async page write`，回读仍是原厂；同分区 8 MiB 偏移处可写 → **范围级写保护，覆盖活动槽镜像区** |
+| 2 | root 下 `dd` 写空闲槽 lk_b | **成功**，回读 hash 与构建镜像一致 → 写保护只覆盖活动槽 |
+| 3 | `fastboot set_active b` 后重启 | 命令在 locked 状态可用；b 槽 system 无效 → 反复重启，随后自动回退 a；lk_b 内容保留 |
+| 4 | 原厂 lk.img 写入 lk_b，切 b + `reboot-bootloader` | **能进 fastboot** → b 槽与 reboot-bootloader 路径本身可用 |
+| 5 | 本分支构建的镜像写入 lk_b，同样操作 | **未能进 fastboot**（反复重启），原因未定位 |
+
+由 #4、#5 可知：问题被缩小到“本分支构建的镜像”或“该镜像在 b 槽的启动条件”，
+与槽位切换机制无关。下一步在空闲槽上用二分构建（仅 liblk 重建 / 仅换 key /
+仅 no-wipe / 完整镜像）复现并定位。
+
+同一轮还确认：生态中 `ro.boot.vbmeta.device_state=locked` 等“伪回锁”属性是
+KernelSU 模块用 `resetprop` 在用户态设置的，**LK 未参与**；本分支不改
+`device_state` 的决定保持不变。
+
+## 10. 变更记录
+
+### v0.2 — 发布前校验脚本与现场记录
+
+- 新增 `tests/verify_build.py`（分区 / cert1 / cert2 / 密钥配对检查）；
+- 第 9 节增加现场测试记录；
+- 明确“伪回锁属性由用户态模块负责、LK 不参与”的边界。
 
 ### v0.1 — lk 写保护与伪回锁
 

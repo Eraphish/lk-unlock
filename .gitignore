@@ -6,3 +6,5 @@ dist/
 lk-unlock.spec
 private.pem
 public.pem
+# local-only notes (device details, do not commit)
+/LOCAL_NOTES.md
