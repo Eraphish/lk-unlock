@@ -92,6 +92,51 @@ fastboot stage signature.bin
 fastboot oem unlock
 ```
 
+### 5. LK write protection and fake lock state
+
+This fork adds two optional patches, both applied to the stock `lk.img`:
+
+```bash
+python lk-unlock.py patch lk.img -o lk_patched.img --lk-protect fail --fake-lock
+```
+
+- `--lk-protect {fail,okay,off}` (default `fail`): the fastboot `flash:` and
+  `erase:` handlers are wrapped by a small injected routine. Writes/erases of
+  `lk`, `lk_a`, `lk_b` and `lk_ab` are refused (`fail` → `FAIL <msg>`) or
+  silently skipped (`okay` → `OKAY <msg>`); every other partition is forwarded
+  to the original handler untouched.
+- `--fake-lock`: appends `androidboot.verifiedbootstate=green` to the kernel
+  cmdline, so Android reports a verified/locked boot while the bootloader stays
+  unlocked and `flash:`/`erase:` keep working for boot/system/vendor/etc.
+
+Both patches are implemented as code caves in the zero-filled padding before
+the `lk` string table and do **not** change the partition size. The cert2
+hash-override block is rebuilt automatically afterwards.
+
+Notes:
+
+- The protection only covers fastboot. OTA on the phone writes `lk` through the
+  kernel block layer; use a KernelSU loop-redirect module or the
+  write will land on the real partition.
+- To update the LK later: build with `--lk-protect off`, or write the real
+  block device as root (bypassing any `/dev/block/by-name` redirect), or use
+  BROM.
+- `resign` recomputes the cert2 override for an already edited image whose
+  cert2 is still the stock one:
+
+  ```bash
+  python lk-unlock.py resign edited.img -o resigned.img
+  ```
+- The injected code is verified offline with Unicorn:
+
+  ```bash
+  pip install unicorn
+  python3 tests/emu_check.py lk_patched.img
+  ```
+
+  This emulates the caves and checks the partition-name matrix and the cmdline
+  appends. It does **not** prove the image boots; always keep a recovery path.
+
 ## Cert Bypass Modes
 
 - **Override** (`--override`, default): Inserts a custom hash override block into the certificate (2026 vulnerability, no CVE code). 
